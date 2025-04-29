@@ -3,103 +3,133 @@ import email
 import os
 from dotenv import load_dotenv
 import tkinter as tk
-from tkinter import messagebox, simpledialog, Listbox, Scrollbar
-from datetime import datetime
+from tkinter import messagebox, simpledialog, scrolledtext
 
+# Load environment variables
 load_dotenv()
-
 EMAIL = os.getenv("EMAIL")
 PASSWORD = os.getenv("PASSWORD")
 
-class EmailApp:
-    def __init__(self, master):
-        self.master = master
-        master.title("Email Filter and Viewer")
+# Connect to Gmail
+mail = imaplib.IMAP4_SSL("imap.gmail.com")
+mail.login(EMAIL, PASSWORD)
+mail.select("inbox")
 
-        # Input fields
-        tk.Label(master, text="From:").grid(row=0, column=0)
-        self.from_entry = tk.Entry(master)
-        self.from_entry.grid(row=0, column=1)
+# GUI setup
+root = tk.Tk()
+root.title("Email Filter & Deletion Tool")
+root.geometry("700x500")
 
-        tk.Label(master, text="Subject Contains:").grid(row=1, column=0)
-        self.subject_entry = tk.Entry(master)
-        self.subject_entry.grid(row=1, column=1)
+status_label = tk.Label(root, text="Connected to Gmail", fg="green")
+status_label.pack()
 
-        tk.Label(master, text="Since (DD-Mon-YYYY):").grid(row=2, column=0)
-        self.since_entry = tk.Entry(master)
-        self.since_entry.grid(row=2, column=1)
+sender_entry = tk.Entry(root, width=50)
+sender_entry.pack()
+sender_entry.insert(0, "From:")
 
-        # Search button
-        self.search_button = tk.Button(master, text="Search", command=self.search_emails)
-        self.search_button.grid(row=3, column=0, columnspan=2)
+subject_entry = tk.Entry(root, width=50)
+subject_entry.pack()
+subject_entry.insert(0, "Subject contains:")
 
-        # Listbox for results
-        self.email_listbox = Listbox(master, width=80, height=10)
-        self.email_listbox.grid(row=4, column=0, columnspan=2)
+date_entry = tk.Entry(root, width=50)
+date_entry.pack()
+date_entry.insert(0, "Since date (e.g., 01-Apr-2024):")
 
-        scrollbar = Scrollbar(master)
-        scrollbar.grid(row=4, column=2, sticky='ns')
-        self.email_listbox.config(yscrollcommand=scrollbar.set)
-        scrollbar.config(command=self.email_listbox.yview)
+results_listbox = tk.Listbox(root, width=80, height=10)
+results_listbox.pack()
 
-        # Preview and status
-        self.status_label = tk.Label(master, text="Status: Waiting...")
-        self.status_label.grid(row=5, column=0, columnspan=2)
+preview_area = scrolledtext.ScrolledText(root, width=80, height=10, wrap=tk.WORD)
+preview_area.pack()
 
-        self.email_data = []
+uid_map = []  # Holds (uid, subject)
 
-    def search_emails(self):
-        sender = self.from_entry.get().strip()
-        subject = self.subject_entry.get().strip()
-        since = self.since_entry.get().strip()
+def build_search_query():
+    query = []
+    from_val = sender_entry.get().replace("From:", "").strip()
+    if from_val:
+        query += ["FROM", f'"{from_val}"']
 
-        # Build IMAP filter
-        criteria = []
-        if sender:
-            criteria.append(f'FROM "{sender}"')
-        if subject:
-            criteria.append(f'SUBJECT "{subject}"')
-        if since:
-            try:
-                datetime.strptime(since, "%d-%b-%Y")
-                criteria.append(f'SINCE "{since}"')
-            except ValueError:
-                messagebox.showerror("Date Error", "Date must be in format DD-Mon-YYYY (e.g. 01-Apr-2024)")
-                return
+    subject_val = subject_entry.get().replace("Subject contains:", "").strip()
+    if subject_val:
+        query += ["SUBJECT", f'"{subject_val}"']
 
-        search_filter = f'({" ".join(criteria)})' if criteria else "ALL"
+    date_val = date_entry.get().replace("Since date (e.g., 01-Apr-2024):", "").strip()
+    if date_val:
+        query += ["SINCE", date_val]
 
-        try:
-            self.status_label.config(text="Connecting to Gmail...")
-            mail = imaplib.IMAP4_SSL("imap.gmail.com")
-            mail.login(EMAIL, PASSWORD)
-            mail.select("inbox")
+    return query if query else ["ALL"]
 
-            status, messages = mail.search(None, search_filter)
-            if status != "OK":
-                self.status_label.config(text="Failed to retrieve emails.")
-                return
+def search_emails():
+    results_listbox.delete(0, tk.END)
+    preview_area.delete("1.0", tk.END)
+    global uid_map
+    uid_map.clear()
+    
+    query = build_search_query()
+    status, messages = mail.search(None, *query)
+    if status != "OK":
+        status_label.config(text="Search failed", fg="red")
+        return
 
-            email_ids = messages[0].split()
-            self.email_listbox.delete(0, tk.END)
-            self.email_data = []
+    email_ids = messages[0].split()
+    for num in email_ids:
+        status, data = mail.fetch(num, '(RFC822)')
+        if status != "OK":
+            continue
+        msg = email.message_from_bytes(data[0][1])
+        subject = msg["subject"] or "(No Subject)"
+        uid_map.append((num, subject))
+        results_listbox.insert(tk.END, subject)
 
-            for num in email_ids[-10:]:  # Show only last 10
-                typ, msg_data = mail.fetch(num, "(RFC822)")
-                msg = email.message_from_bytes(msg_data[0][1])
-                subject = msg["subject"] or "(No Subject)"
-                self.email_listbox.insert(tk.END, subject)
-                self.email_data.append((num, msg))
+    status_label.config(text=f"Found {len(uid_map)} emails.", fg="blue")
 
-            self.status_label.config(text=f"✅ Found {len(email_ids)} email(s). Showing last {min(len(email_ids), 10)}")
-            mail.logout()
+def preview_email():
+    preview_area.delete("1.0", tk.END)
+    selection = results_listbox.curselection()
+    if not selection:
+        return
+    uid = uid_map[selection[0]][0]
+    status, data = mail.fetch(uid, '(RFC822)')
+    if status != "OK":
+        return
+    msg = email.message_from_bytes(data[0][1])
 
-        except Exception as e:
-            self.status_label.config(text=f"❌ Error: {e}")
-            messagebox.showerror("Connection Error", str(e))
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain" and not part.get("Content-Disposition"):
+                body += part.get_payload(decode=True).decode(errors="ignore")
+    else:
+        body += msg.get_payload(decode=True).decode(errors="ignore")
 
+    preview_area.insert(tk.END, body[:5000])
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = EmailApp(root)
-    root.mainloop()
+def delete_email():
+    selection = results_listbox.curselection()
+    if not selection:
+        return
+    uid = uid_map[selection[0]][0]
+    subject = uid_map[selection[0]][1]
+
+    confirm = messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete:\n{subject}")
+    if confirm:
+        mail.store(uid, '+FLAGS', '\\Deleted')
+        mail.expunge()
+        results_listbox.delete(selection[0])
+        preview_area.delete("1.0", tk.END)
+        del uid_map[selection[0]]
+        status_label.config(text="Email deleted.", fg="red")
+
+search_button = tk.Button(root, text="Search", command=search_emails)
+search_button.pack()
+
+preview_button = tk.Button(root, text="Preview", command=preview_email)
+preview_button.pack()
+
+delete_button = tk.Button(root, text="Delete", command=delete_email)
+delete_button.pack()
+
+root.mainloop()
+
+# Cleanup on exit
+mail.logout()
