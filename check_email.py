@@ -4,6 +4,7 @@ import os
 from dotenv import load_dotenv
 import tkinter as tk
 from tkinter import messagebox, simpledialog, scrolledtext
+from email.header import decode_header
 
 # Load environment variables
 load_dotenv()
@@ -43,6 +44,10 @@ preview_area.pack()
 
 uid_map = []  # Holds (uid, subject)
 
+def decode_mime_words(s):
+    decoded = decode_header(s)
+    return ''.join([str(t[0], t[1] or 'utf-8') if isinstance(t[0], bytes) else t[0] for t in decoded])
+
 def build_search_query():
     query = []
     from_val = sender_entry.get().replace("From:", "").strip()
@@ -64,7 +69,7 @@ def search_emails():
     preview_area.delete("1.0", tk.END)
     global uid_map
     uid_map.clear()
-    
+
     query = build_search_query()
     status, messages = mail.search(None, *query)
     if status != "OK":
@@ -77,7 +82,7 @@ def search_emails():
         if status != "OK":
             continue
         msg = email.message_from_bytes(data[0][1])
-        subject = msg["subject"] or "(No Subject)"
+        subject = decode_mime_words(msg["subject"] or "(No Subject)")
         uid_map.append((num, subject))
         results_listbox.insert(tk.END, subject)
 
@@ -97,8 +102,11 @@ def preview_email():
     body = ""
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == "text/plain" and not part.get("Content-Disposition"):
+            content_type = part.get_content_type()
+            if content_type == "text/plain" and not part.get("Content-Disposition"):
                 body += part.get_payload(decode=True).decode(errors="ignore")
+            elif content_type == "text/html" and not part.get("Content-Disposition"):
+                body += "\n[HTML content available. Use a browser/email client to view.]\n"
     else:
         body += msg.get_payload(decode=True).decode(errors="ignore")
 
