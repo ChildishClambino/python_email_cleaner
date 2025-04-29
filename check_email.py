@@ -3,11 +3,11 @@ import email
 import os
 from dotenv import load_dotenv
 
-
+load_dotenv()
 
 # STEP 1: Replace these with your actual values
-EMAIL = os.get.env("EMAIL")
-PASSWORD = os.get.env("PASSWORD")
+EMAIL = os.getenv("EMAIL")
+PASSWORD = os.getenv("PASSWORD")
 
 # STEP 2: Connect to Gmail's IMAP server securely
 mail = imaplib.IMAP4_SSL("imap.gmail.com")
