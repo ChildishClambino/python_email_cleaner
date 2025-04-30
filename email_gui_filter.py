@@ -250,11 +250,11 @@ def threaded_search():
             print(f"[DEBUG] Found {len(uid_map)} emails.")
 
         except imaplib.IMAP4.abort:
-            try:
-                mail.logout()
-            except:
-                pass
-            reconnect_and_search()
+            print("[ERROR] IMAP connection aborted during search, attempting reconnect...")
+            if reconnect():
+                threaded_search()
+
+        
         except Exception as e:
             status_label.config(text=f"Error: {str(e)}", fg="red")
             print("[ERROR]", str(e))
