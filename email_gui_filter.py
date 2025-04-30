@@ -261,8 +261,42 @@ def threaded_search():
 
     threading.Thread(target=search_emails, daemon=True).start()
 
+
+def preview_email():
+    preview_area.delete("1.0", tk.END)
+    selection = results_listbox.curselection()
+    if not selection:
+        print("[DEBUG] No email selected to preview")
+        return
+
+    uid = encode_uid(uid_map[selection[0]][0])
+    print(f"[DEBUG] Previewing UID: {uid}")
+
+    try:
+        result, data = mail.uid('FETCH', uid.encode(), '(RFC822)')
+        if result != "OK":
+            print(f"[ERROR] Failed to fetch email for UID {uid}")
+            return
+        msg = email.message_from_bytes(data[0][1])
+
+        body = ""
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain" and not part.get("Content-Disposition"):
+                    body += part.get_payload(decode=True).decode(errors="ignore")
+        else:
+            body += msg.get_payload(decode=True).decode(errors="ignore")
+
+        preview_area.insert(tk.END, body[:5000])
+        print("[DEBUG] Preview loaded successfully")
+    except Exception as e:
+        print(f"[ERROR] Failed to preview email: {e}")
+        messagebox.showerror("Error", f"Failed to preview email: {e}")
+
+
 tk.Button(root, text="Search", command=threaded_search).pack()
-tk.Button(root, text="Preview", command=lambda: None).pack()
+tk.Button(root, text="Preview", command=preview_email).pack()
+
 tk.Button(root, text="Delete", command=delete_email).pack()
 tk.Button(root, text="Delete All Results", command=delete_all_results).pack()
 
