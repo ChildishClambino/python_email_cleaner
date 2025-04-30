@@ -1,10 +1,12 @@
 import imaplib
 import email
 import os
+import threading
 from dotenv import load_dotenv
 import tkinter as tk
 from tkinter import messagebox, simpledialog, scrolledtext
-from email.header import decode_header
+import calendar
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -19,7 +21,7 @@ mail.select("inbox")
 # GUI setup
 root = tk.Tk()
 root.title("Email Filter & Deletion Tool")
-root.geometry("700x500")
+root.geometry("700x550")
 
 status_label = tk.Label(root, text="Connected to Gmail", fg="green")
 status_label.pack()
@@ -32,9 +34,25 @@ subject_entry = tk.Entry(root, width=50)
 subject_entry.pack()
 subject_entry.insert(0, "Subject contains:")
 
-date_entry = tk.Entry(root, width=50)
-date_entry.pack()
-date_entry.insert(0, "Since date (e.g., 01-Apr-2024):")
+# Date dropdowns
+date_frame = tk.Frame(root)
+date_frame.pack()
+
+day_var = tk.StringVar(value="Day")
+month_var = tk.StringVar(value="Month")
+year_var = tk.StringVar(value="Year")
+
+day_menu = tk.OptionMenu(date_frame, day_var, *[str(i).zfill(2) for i in range(1, 32)])
+month_menu = tk.OptionMenu(date_frame, month_var, *calendar.month_abbr[1:])
+year_menu = tk.OptionMenu(date_frame, year_var, *[str(y) for y in range(datetime.now().year, datetime.now().year - 10, -1)])
+
+day_menu.pack(side="left")
+month_menu.pack(side="left")
+year_menu.pack(side="left")
+
+safe_mode = tk.BooleanVar(value=True)
+safe_mode_checkbox = tk.Checkbutton(root, text="Safe Mode (Preview Only)", variable=safe_mode)
+safe_mode_checkbox.pack()
 
 results_listbox = tk.Listbox(root, width=80, height=10)
 results_listbox.pack()
@@ -44,25 +62,27 @@ preview_area.pack()
 
 uid_map = []  # Holds (uid, subject)
 
-def decode_mime_words(s):
-    decoded = decode_header(s)
-    return ''.join([str(t[0], t[1] or 'utf-8') if isinstance(t[0], bytes) else t[0] for t in decoded])
-
 def build_search_query():
     query = []
     from_val = sender_entry.get().replace("From:", "").strip()
+    subject_val = subject_entry.get().replace("Subject contains:", "").strip()
+
+    date_val = ""
+    if day_var.get().isdigit() and month_var.get() != "Month" and year_var.get().isdigit():
+        date_val = f"{day_var.get()}-{month_var.get()}-{year_var.get()}"
+
+    if not from_val and not subject_val and not date_val:
+        messagebox.showwarning("Empty Search", "Please enter at least one filter.")
+        return None
+
     if from_val:
         query += ["FROM", f'"{from_val}"']
-
-    subject_val = subject_entry.get().replace("Subject contains:", "").strip()
     if subject_val:
         query += ["SUBJECT", f'"{subject_val}"']
-
-    date_val = date_entry.get().replace("Since date (e.g., 01-Apr-2024):", "").strip()
     if date_val:
         query += ["SINCE", date_val]
 
-    return query if query else ["ALL"]
+    return query
 
 def search_emails():
     results_listbox.delete(0, tk.END)
@@ -71,22 +91,51 @@ def search_emails():
     uid_map.clear()
 
     query = build_search_query()
-    status, messages = mail.search(None, *query)
-    if status != "OK":
-        status_label.config(text="Search failed", fg="red")
+    if not query:
         return
 
-    email_ids = messages[0].split()
-    for num in email_ids:
-        status, data = mail.fetch(num, '(RFC822)')
+    try:
+        status, messages = mail.search(None, *query)
         if status != "OK":
-            continue
-        msg = email.message_from_bytes(data[0][1])
-        subject = decode_mime_words(msg["subject"] or "(No Subject)")
-        uid_map.append((num, subject))
-        results_listbox.insert(tk.END, subject)
+            status_label.config(text="Search failed", fg="red")
+            return
 
-    status_label.config(text=f"Found {len(uid_map)} emails.", fg="blue")
+        email_ids = messages[0].split()
+        for num in email_ids:
+            status, data = mail.fetch(num, '(RFC822)')
+            if status != "OK":
+                continue
+            msg = email.message_from_bytes(data[0][1])
+            subject = msg["subject"] or "(No Subject)"
+            uid_map.append((num, subject))
+            results_listbox.insert(tk.END, subject)
+            root.update()
+
+        status_label.config(text=f"Found {len(uid_map)} emails.", fg="blue")
+
+    except imaplib.IMAP4.abort as e:
+        status_label.config(text="IMAP aborted. Trying to reconnect...", fg="orange")
+        try:
+            mail.logout()
+        except:
+            pass
+        reconnect_and_search()
+
+    except Exception as e:
+        status_label.config(text=f"Error: {str(e)}", fg="red")
+
+def reconnect_and_search():
+    global mail
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(EMAIL, PASSWORD)
+        mail.select("inbox")
+        search_emails()
+    except Exception as e:
+        status_label.config(text=f"Reconnect failed: {str(e)}", fg="red")
+
+def threaded_search():
+    threading.Thread(target=search_emails, daemon=True).start()
 
 def preview_email():
     preview_area.delete("1.0", tk.END)
@@ -102,11 +151,8 @@ def preview_email():
     body = ""
     if msg.is_multipart():
         for part in msg.walk():
-            content_type = part.get_content_type()
-            if content_type == "text/plain" and not part.get("Content-Disposition"):
+            if part.get_content_type() == "text/plain" and not part.get("Content-Disposition"):
                 body += part.get_payload(decode=True).decode(errors="ignore")
-            elif content_type == "text/html" and not part.get("Content-Disposition"):
-                body += "\n[HTML content available. Use a browser/email client to view.]\n"
     else:
         body += msg.get_payload(decode=True).decode(errors="ignore")
 
@@ -121,14 +167,36 @@ def delete_email():
 
     confirm = messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete:\n{subject}")
     if confirm:
-        mail.store(uid, '+FLAGS', '\\Deleted')
-        mail.expunge()
-        results_listbox.delete(selection[0])
-        preview_area.delete("1.0", tk.END)
-        del uid_map[selection[0]]
-        status_label.config(text="Email deleted.", fg="red")
+        if safe_mode.get():
+            messagebox.showinfo("Safe Mode", "Safe Mode is ON — no email was deleted.")
+        else:
+            mail.store(uid, '+FLAGS', '\\Deleted')
+            mail.expunge()
+            results_listbox.delete(selection[0])
+            preview_area.delete("1.0", tk.END)
+            del uid_map[selection[0]]
+            status_label.config(text="Email deleted.", fg="red")
 
-search_button = tk.Button(root, text="Search", command=search_emails)
+def delete_all_results():
+    if not uid_map:
+        return
+    confirm = messagebox.askyesno("Confirm Mass Delete", f"Are you sure you want to delete ALL {len(uid_map)} emails?")
+    if not confirm:
+        return
+
+    if safe_mode.get():
+        messagebox.showinfo("Safe Mode", "Safe Mode is ON — no emails were deleted.")
+        return
+
+    for uid, subject in uid_map:
+        mail.store(uid, '+FLAGS', '\\Deleted')
+    mail.expunge()
+    uid_map.clear()
+    results_listbox.delete(0, tk.END)
+    preview_area.delete("1.0", tk.END)
+    status_label.config(text="All emails deleted.", fg="red")
+
+search_button = tk.Button(root, text="Search", command=threaded_search)
 search_button.pack()
 
 preview_button = tk.Button(root, text="Preview", command=preview_email)
@@ -137,7 +205,15 @@ preview_button.pack()
 delete_button = tk.Button(root, text="Delete", command=delete_email)
 delete_button.pack()
 
-root.mainloop()
+delete_all_button = tk.Button(root, text="Delete All Results", command=delete_all_results)
+delete_all_button.pack()
 
-# Cleanup on exit
-mail.logout()
+def on_closing():
+    try:
+        mail.logout()
+    except Exception as e:
+        print("Logout failed:", e)
+    root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_closing)
+root.mainloop()
