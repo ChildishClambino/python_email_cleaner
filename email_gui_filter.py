@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, scrolledtext
 import calendar
 from datetime import datetime
+import time  # Add this at the top with your other imports
 
 # Load environment variables (PyInstaller-compatible)
 base_dir = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
@@ -92,15 +93,26 @@ def reconnect():
     global mail
     try:
         print("[DEBUG] Reconnecting to Gmail IMAP...")
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(EMAIL, PASSWORD)
-        mail.select("inbox")
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")  # Fresh connection
+        resp, _ = mail.login(EMAIL, PASSWORD)
+        if resp != "OK":
+            raise Exception("Login failed during reconnect")
+
+        time.sleep(0.5)  # 👈 brief pause helps prevent NONAUTH bug
+        resp, _ = mail.select("inbox")
+        if resp != "OK":
+            raise Exception("Inbox select failed during reconnect")
+
         print("[DEBUG] Reconnected and inbox selected")
         return True
+    except imaplib.IMAP4.abort as e:
+        print("[ERROR] IMAP abort during reconnect:", e)
+    except imaplib.IMAP4.error as e:
+        print("[ERROR] IMAP error during reconnect:", e)
     except Exception as e:
-        print("[ERROR] Reconnect failed:", str(e))
-        status_label.config(text=f"Reconnect failed: {str(e)}", fg="red")
-        return False
+        print("[ERROR] General reconnect error:", e)
+
+    return False
 
 def delete_email():
     def task():
@@ -269,64 +281,69 @@ def preview_email():
         if not selection:
             print("[DEBUG] No email selected for preview")
             return
+
         uid = uid_map[selection[0]][0]
-        print(f"[DEBUG] Previewing UID: {uid}")
+        uid_str = encode_uid(uid).strip()
+        print(f"[DEBUG] Previewing UID: {uid_str}")
+
         try:
-            uid_str = encode_uid(uid).strip()
             result, data = mail.uid('FETCH', uid_str.encode(), '(RFC822)')
             if result != "OK":
-                raise Exception(f"UID FETCH command failed with status: {result}")
+                raise Exception(f"Failed to fetch email content: {result}")
 
-            raw_email = data[0][1]
-            msg = email.message_from_bytes(raw_email)
-
-            body = None
-            html_content = None
+            msg = email.message_from_bytes(data[0][1])
+            preview_text = ""
+            attachments_saved = 0
 
             if msg.is_multipart():
                 for part in msg.walk():
                     content_type = part.get_content_type()
-                    content_disposition = str(part.get("Content-Disposition"))
+                    disp = str(part.get("Content-Disposition"))
 
-                    if "attachment" in content_disposition:
-                        continue  # We'll handle attachments separately
+                    if "attachment" in disp:
+                        filename = part.get_filename()
+                        if filename:
+                            attachments_path = Path("/mnt/data/email_gui_filter/attachments")
+                            attachments_path.mkdir(parents=True, exist_ok=True)
+                            file_path = attachments_path / filename
+                            with open(file_path, "wb") as f:
+                                f.write(part.get_payload(decode=True))
+                            attachments_saved += 1
+                            print(f"[DEBUG] Saved attachment: {file_path}")
 
-                    if content_type == "text/plain" and body is None:
-                        body = part.get_payload(decode=True).decode(errors="ignore")
-                    elif content_type == "text/html" and html_content is None:
+                    elif content_type == "text/plain" and not disp:
+                        preview_text += part.get_payload(decode=True).decode(errors="ignore")
+
+                    elif content_type == "text/html" and not disp and not preview_text:
                         html_content = part.get_payload(decode=True).decode(errors="ignore")
-            else:
-                content_type = msg.get_content_type()
-                if content_type == "text/plain":
-                    body = msg.get_payload(decode=True).decode(errors="ignore")
-                elif content_type == "text/html":
-                    html_content = msg.get_payload(decode=True).decode(errors="ignore")
+                        preview_text = "[HTML Preview Fallback]\n" + re.sub(r'<[^>]+>', '', html_content)  # crude HTML to text
 
-            if html_content:
-                try:
-                    # Strip HTML tags for clean preview (optional)
-                    import re
-                    clean = re.sub(r'<[^>]+>', '', html_content)
-                    preview_area.insert(tk.END, clean[:5000])
-                    print("[DEBUG] Rendered HTML content")
-                except Exception as e:
-                    preview_area.insert(tk.END, "[ERROR] Failed to process HTML content.\n")
-                    print("[ERROR]", e)
-            elif body:
-                preview_area.insert(tk.END, body[:5000])
-                print("[DEBUG] Rendered plain text content")
             else:
-                preview_area.insert(tk.END, "[No readable body found]")
+                preview_text = msg.get_payload(decode=True).decode(errors="ignore")
+
+            preview_area.insert(tk.END, preview_text[:10000])  # Limit to 10k chars for performance
+            if attachments_saved:
+                headers = [
+                    f"From: {msg.get('From')}",
+                    f"To: {msg.get('To')}",
+                    f"Date: {msg.get('Date')}",
+                    f"Subject: {msg.get('Subject')}",
+                    "\n"
+                ]
+                preview_area.insert(tk.END, "\n".join(headers))
+
+                preview_area.insert(tk.END, f"\n\n[INFO] {attachments_saved} attachment(s) saved to attachments folder.")
+
         except imaplib.IMAP4.abort:
             print("[ERROR] Connection aborted during preview, attempting to reconnect...")
             if reconnect():
-                task()
+                root.after(1000, task)  # Wait 1 sec before retry
+
         except Exception as e:
-            print("[ERROR] Failed to preview email:", e)
-            messagebox.showerror("Error", f"Failed to preview email: {e}")
+            print(f"[ERROR] Failed to preview email: {e}")
+            messagebox.showerror("Preview Error", f"Failed to preview email: {e}")
 
     threading.Thread(target=task, daemon=True).start()
-
 
 tk.Button(root, text="Search", command=threaded_search).pack()
 tk.Button(root, text="Preview", command=preview_email).pack()
