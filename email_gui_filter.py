@@ -263,39 +263,74 @@ def threaded_search():
 
 
 def preview_email():
-    preview_area.delete("1.0", tk.END)
-    selection = results_listbox.curselection()
-    if not selection:
-        print("[DEBUG] No email selected to preview")
-        return
-
-    uid = encode_uid(uid_map[selection[0]][0])
-    print(f"[DEBUG] Previewing UID: {uid}")
-
-    try:
-        result, data = mail.uid('FETCH', uid.encode(), '(RFC822)')
-        if result != "OK":
-            print(f"[ERROR] Failed to fetch email for UID {uid}")
+    def task():
+        preview_area.delete("1.0", tk.END)
+        selection = results_listbox.curselection()
+        if not selection:
+            print("[DEBUG] No email selected for preview")
             return
-        msg = email.message_from_bytes(data[0][1])
+        uid = uid_map[selection[0]][0]
+        print(f"[DEBUG] Previewing UID: {uid}")
+        try:
+            uid_str = encode_uid(uid).strip()
+            result, data = mail.uid('FETCH', uid_str.encode(), '(RFC822)')
+            if result != "OK":
+                raise Exception(f"UID FETCH command failed with status: {result}")
 
-        body = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_type() == "text/plain" and not part.get("Content-Disposition"):
-                    body += part.get_payload(decode=True).decode(errors="ignore")
-        else:
-            body += msg.get_payload(decode=True).decode(errors="ignore")
+            raw_email = data[0][1]
+            msg = email.message_from_bytes(raw_email)
 
-        preview_area.insert(tk.END, body[:5000])
-        print("[DEBUG] Preview loaded successfully")
-    except Exception as e:
-        print(f"[ERROR] Failed to preview email: {e}")
-        messagebox.showerror("Error", f"Failed to preview email: {e}")
+            body = None
+            html_content = None
+
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    content_disposition = str(part.get("Content-Disposition"))
+
+                    if "attachment" in content_disposition:
+                        continue  # We'll handle attachments separately
+
+                    if content_type == "text/plain" and body is None:
+                        body = part.get_payload(decode=True).decode(errors="ignore")
+                    elif content_type == "text/html" and html_content is None:
+                        html_content = part.get_payload(decode=True).decode(errors="ignore")
+            else:
+                content_type = msg.get_content_type()
+                if content_type == "text/plain":
+                    body = msg.get_payload(decode=True).decode(errors="ignore")
+                elif content_type == "text/html":
+                    html_content = msg.get_payload(decode=True).decode(errors="ignore")
+
+            if html_content:
+                try:
+                    # Strip HTML tags for clean preview (optional)
+                    import re
+                    clean = re.sub(r'<[^>]+>', '', html_content)
+                    preview_area.insert(tk.END, clean[:5000])
+                    print("[DEBUG] Rendered HTML content")
+                except Exception as e:
+                    preview_area.insert(tk.END, "[ERROR] Failed to process HTML content.\n")
+                    print("[ERROR]", e)
+            elif body:
+                preview_area.insert(tk.END, body[:5000])
+                print("[DEBUG] Rendered plain text content")
+            else:
+                preview_area.insert(tk.END, "[No readable body found]")
+        except imaplib.IMAP4.abort:
+            print("[ERROR] Connection aborted during preview, attempting to reconnect...")
+            if reconnect():
+                task()
+        except Exception as e:
+            print("[ERROR] Failed to preview email:", e)
+            messagebox.showerror("Error", f"Failed to preview email: {e}")
+
+    threading.Thread(target=task, daemon=True).start()
 
 
 tk.Button(root, text="Search", command=threaded_search).pack()
 tk.Button(root, text="Preview", command=preview_email).pack()
+
 
 tk.Button(root, text="Delete", command=delete_email).pack()
 tk.Button(root, text="Delete All Results", command=delete_all_results).pack()
