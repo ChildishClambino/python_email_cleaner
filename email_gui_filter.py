@@ -93,18 +93,29 @@ def reconnect():
     global mail
     try:
         print("[DEBUG] Reconnecting to Gmail IMAP...")
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")  # Fresh connection
+        time.sleep(5)  # Avoid hammering Gmail
+
+
+        try:
+            mail.logout()  # Clean disconnect
+        except Exception as e:
+            print("[WARN] Failed to logout cleanly:", e)
+
+        time.sleep(1)  # Prevent rapid reconnects
+
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
         resp, _ = mail.login(EMAIL, PASSWORD)
         if resp != "OK":
             raise Exception("Login failed during reconnect")
 
-        time.sleep(0.5)  # 👈 brief pause helps prevent NONAUTH bug
+        time.sleep(0.5)
         resp, _ = mail.select("inbox")
         if resp != "OK":
             raise Exception("Inbox select failed during reconnect")
 
         print("[DEBUG] Reconnected and inbox selected")
         return True
+
     except imaplib.IMAP4.abort as e:
         print("[ERROR] IMAP abort during reconnect:", e)
     except imaplib.IMAP4.error as e:
@@ -274,21 +285,36 @@ def threaded_search():
     threading.Thread(target=search_emails, daemon=True).start()
 
 
-def preview_email():
-    def task():
-        preview_area.delete("1.0", tk.END)
+def preview_email(retry_count=0, uid=None, index=None):
+    # Resolve selection before starting the thread to avoid UnboundLocalError
+    if uid is None or index is None:
         selection = results_listbox.curselection()
         if not selection:
             print("[DEBUG] No email selected for preview")
             return
+        index = selection[0]
+        uid = uid_map[index][0]
 
-        uid = uid_map[selection[0]][0]
+    def task():
+        preview_area.delete("1.0", tk.END)
         uid_str = encode_uid(uid).strip()
         print(f"[DEBUG] Previewing UID: {uid_str}")
 
         try:
             result, data = mail.uid('FETCH', uid_str.encode(), '(RFC822)')
             if result != "OK":
+                raw = ""
+                if isinstance(data[0], tuple) and isinstance(data[0][1], bytes):
+                    try:
+                        raw = data[0][1][:200].decode(errors="ignore").lower()
+                    except Exception as decode_error:
+                        print(f"[WARN] Failed to decode email preview: {decode_error}")
+
+                if "<html" in raw and "</html>" in raw:
+                    raise Exception("Gmail returned HTML content instead of email. Account may be temporarily blocked or require login.")
+
+                raise Exception(f"Failed to fetch email content: {result}")
+
                 raise Exception(f"Failed to fetch email content: {result}")
 
             msg = email.message_from_bytes(data[0][1])
@@ -303,7 +329,7 @@ def preview_email():
                     if "attachment" in disp:
                         filename = part.get_filename()
                         if filename:
-                            attachments_path = Path("/mnt/data/email_gui_filter/attachments")
+                            attachments_path = Path("./attachments")
                             attachments_path.mkdir(parents=True, exist_ok=True)
                             file_path = attachments_path / filename
                             with open(file_path, "wb") as f:
@@ -316,12 +342,12 @@ def preview_email():
 
                     elif content_type == "text/html" and not disp and not preview_text:
                         html_content = part.get_payload(decode=True).decode(errors="ignore")
-                        preview_text = "[HTML Preview Fallback]\n" + re.sub(r'<[^>]+>', '', html_content)  # crude HTML to text
+                        preview_text = "[HTML Preview Fallback]\n" + re.sub(r'<[^>]+>', '', html_content)
 
             else:
                 preview_text = msg.get_payload(decode=True).decode(errors="ignore")
 
-            preview_area.insert(tk.END, preview_text[:10000])  # Limit to 10k chars for performance
+            preview_area.insert(tk.END, preview_text[:10000])
             if attachments_saved:
                 headers = [
                     f"From: {msg.get('From')}",
@@ -331,19 +357,23 @@ def preview_email():
                     "\n"
                 ]
                 preview_area.insert(tk.END, "\n".join(headers))
-
                 preview_area.insert(tk.END, f"\n\n[INFO] {attachments_saved} attachment(s) saved to attachments folder.")
 
         except imaplib.IMAP4.abort:
             print("[ERROR] Connection aborted during preview, attempting to reconnect...")
-            if reconnect():
-                root.after(1000, task)  # Wait 1 sec before retry
+            if retry_count < 3 and reconnect():
+                print("[DEBUG] Retrying preview after reconnect...")
+                root.after(3000, lambda: preview_email(retry_count + 1, uid=uid, index=index))
+
+            else:
+                messagebox.showerror("Preview Failed", "Unable to preview email after multiple attempts.")
 
         except Exception as e:
             print(f"[ERROR] Failed to preview email: {e}")
             messagebox.showerror("Preview Error", f"Failed to preview email: {e}")
 
     threading.Thread(target=task, daemon=True).start()
+
 
 tk.Button(root, text="Search", command=threaded_search).pack()
 tk.Button(root, text="Preview", command=preview_email).pack()
